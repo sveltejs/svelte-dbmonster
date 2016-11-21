@@ -1,10 +1,10 @@
-import createTable from './Table.html';
+import Table from './Table.html';
 
 perfMonitor.startFPSMonitor();
 perfMonitor.startMemMonitor();
 perfMonitor.initProfiler('view update');
 
-const table = createTable({
+const table = new Table({
 	target: document.querySelector( '#body' ),
 	data: {
 		dbs: ENV.generateData().toArray()
