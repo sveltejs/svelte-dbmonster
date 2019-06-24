@@ -1,326 +1,505 @@
-function appendNode ( node, target ) {
-	target.appendChild( node );
-}
+this.bundle = this.bundle || {};
+this.bundle.js = (function () {
+    'use strict';
 
-function insertNode ( node, target, anchor ) {
-	target.insertBefore( node, anchor );
-}
+    function noop() { }
+    function run(fn) {
+        return fn();
+    }
+    function blank_object() {
+        return Object.create(null);
+    }
+    function run_all(fns) {
+        fns.forEach(run);
+    }
+    function is_function(thing) {
+        return typeof thing === 'function';
+    }
+    function safe_not_equal(a, b) {
+        return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
+    }
 
-function detachNode ( node ) {
-	node.parentNode.removeChild( node );
-}
+    function append(target, node) {
+        target.appendChild(node);
+    }
+    function insert(target, node, anchor) {
+        target.insertBefore(node, anchor || null);
+    }
+    function detach(node) {
+        node.parentNode.removeChild(node);
+    }
+    function destroy_each(iterations, detaching) {
+        for (let i = 0; i < iterations.length; i += 1) {
+            if (iterations[i])
+                iterations[i].d(detaching);
+        }
+    }
+    function element(name) {
+        return document.createElement(name);
+    }
+    function text(data) {
+        return document.createTextNode(data);
+    }
+    function space() {
+        return text(' ');
+    }
+    function attr(node, attribute, value) {
+        if (value == null)
+            node.removeAttribute(attribute);
+        else
+            node.setAttribute(attribute, value);
+    }
+    function children(element) {
+        return Array.from(element.childNodes);
+    }
+    function set_data(text, data) {
+        data = '' + data;
+        if (text.data !== data)
+            text.data = data;
+    }
 
-function teardownEach ( iterations, detach, start ) {
-	for ( var i = ( start || 0 ); i < iterations.length; i += 1 ) {
-		iterations[i].teardown( detach );
-	}
-}
+    let current_component;
+    function set_current_component(component) {
+        current_component = component;
+    }
 
-function createElement ( name ) {
-	return document.createElement( name );
-}
+    const dirty_components = [];
+    const resolved_promise = Promise.resolve();
+    let update_scheduled = false;
+    const binding_callbacks = [];
+    const render_callbacks = [];
+    const flush_callbacks = [];
+    function schedule_update() {
+        if (!update_scheduled) {
+            update_scheduled = true;
+            resolved_promise.then(flush);
+        }
+    }
+    function add_render_callback(fn) {
+        render_callbacks.push(fn);
+    }
+    function flush() {
+        const seen_callbacks = new Set();
+        do {
+            // first, call beforeUpdate functions
+            // and update components
+            while (dirty_components.length) {
+                const component = dirty_components.shift();
+                set_current_component(component);
+                update(component.$$);
+            }
+            while (binding_callbacks.length)
+                binding_callbacks.shift()();
+            // then, once components are updated, call
+            // afterUpdate functions. This may cause
+            // subsequent updates...
+            while (render_callbacks.length) {
+                const callback = render_callbacks.pop();
+                if (!seen_callbacks.has(callback)) {
+                    callback();
+                    // ...so guard against infinite loops
+                    seen_callbacks.add(callback);
+                }
+            }
+        } while (dirty_components.length);
+        while (flush_callbacks.length) {
+            flush_callbacks.pop()();
+        }
+        update_scheduled = false;
+    }
+    function update($$) {
+        if ($$.fragment) {
+            $$.update($$.dirty);
+            run_all($$.before_render);
+            $$.fragment.p($$.dirty, $$.ctx);
+            $$.dirty = null;
+            $$.after_render.forEach(add_render_callback);
+        }
+    }
+    const outroing = new Set();
+    function transition_in(block, local) {
+        if (block && block.i) {
+            outroing.delete(block);
+            block.i(local);
+        }
+    }
+    function mount_component(component, target, anchor) {
+        const { fragment, on_mount, on_destroy, after_render } = component.$$;
+        fragment.m(target, anchor);
+        // onMount happens after the initial afterUpdate. Because
+        // afterUpdate callbacks happen in reverse order (inner first)
+        // we schedule onMount callbacks before afterUpdate callbacks
+        add_render_callback(() => {
+            const new_on_destroy = on_mount.map(run).filter(is_function);
+            if (on_destroy) {
+                on_destroy.push(...new_on_destroy);
+            }
+            else {
+                // Edge case - component was destroyed immediately,
+                // most likely as a result of a binding initialising
+                run_all(new_on_destroy);
+            }
+            component.$$.on_mount = [];
+        });
+        after_render.forEach(add_render_callback);
+    }
+    function destroy_component(component, detaching) {
+        if (component.$$.fragment) {
+            run_all(component.$$.on_destroy);
+            if (detaching)
+                component.$$.fragment.d(1);
+            // TODO null out other refs, including component.$$ (but need to
+            // preserve final state?)
+            component.$$.on_destroy = component.$$.fragment = null;
+            component.$$.ctx = {};
+        }
+    }
+    function make_dirty(component, key) {
+        if (!component.$$.dirty) {
+            dirty_components.push(component);
+            schedule_update();
+            component.$$.dirty = blank_object();
+        }
+        component.$$.dirty[key] = true;
+    }
+    function init(component, options, instance, create_fragment, not_equal$$1, prop_names) {
+        const parent_component = current_component;
+        set_current_component(component);
+        const props = options.props || {};
+        const $$ = component.$$ = {
+            fragment: null,
+            ctx: null,
+            // state
+            props: prop_names,
+            update: noop,
+            not_equal: not_equal$$1,
+            bound: blank_object(),
+            // lifecycle
+            on_mount: [],
+            on_destroy: [],
+            before_render: [],
+            after_render: [],
+            context: new Map(parent_component ? parent_component.$$.context : []),
+            // everything else
+            callbacks: blank_object(),
+            dirty: null
+        };
+        let ready = false;
+        $$.ctx = instance
+            ? instance(component, props, (key, value) => {
+                if ($$.ctx && not_equal$$1($$.ctx[key], $$.ctx[key] = value)) {
+                    if ($$.bound[key])
+                        $$.bound[key](value);
+                    if (ready)
+                        make_dirty(component, key);
+                }
+            })
+            : props;
+        $$.update();
+        ready = true;
+        run_all($$.before_render);
+        $$.fragment = create_fragment($$.ctx);
+        if (options.target) {
+            if (options.hydrate) {
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                $$.fragment.l(children(options.target));
+            }
+            else {
+                // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+                $$.fragment.c();
+            }
+            if (options.intro)
+                transition_in(component.$$.fragment);
+            mount_component(component, options.target, options.anchor);
+            flush();
+        }
+        set_current_component(parent_component);
+    }
+    class SvelteComponent {
+        $destroy() {
+            destroy_component(this, 1);
+            this.$destroy = noop;
+        }
+        $on(type, callback) {
+            const callbacks = (this.$$.callbacks[type] || (this.$$.callbacks[type] = []));
+            callbacks.push(callback);
+            return () => {
+                const index = callbacks.indexOf(callback);
+                if (index !== -1)
+                    callbacks.splice(index, 1);
+            };
+        }
+        $set() {
+            // overridden by instance, if it has props
+        }
+    }
 
-function createText ( data ) {
-	return document.createTextNode( data );
-}
+    /* src/Table.html generated by Svelte v3.5.4 */
 
-function createComment ( data ) {
-	return document.createComment( data );
-}
+    function get_each_context_1(ctx, list, i) {
+    	const child_ctx = Object.create(ctx);
+    	child_ctx.query = list[i];
+    	return child_ctx;
+    }
 
-function get ( key ) {
-	return key ? this._state[ key ] : this._state;
-}
+    function get_each_context(ctx, list, i) {
+    	const child_ctx = Object.create(ctx);
+    	child_ctx.db = list[i];
+    	return child_ctx;
+    }
 
-function fire ( eventName, data ) {
-	var handlers = eventName in this._handlers && this._handlers[ eventName ].slice();
-	if ( !handlers ) return;
+    // (20:6) {#each db.lastSample.topFiveQueries as query}
+    function create_each_block_1(ctx) {
+    	var td, t0_value = ctx.query.formatElapsed, t0, t1, div2, div0, t2_value = ctx.query.query, t2, t3, div1, td_class_value;
 
-	for ( var i = 0; i < handlers.length; i += 1 ) {
-		handlers[i].call( this, data );
-	}
-}
+    	return {
+    		c() {
+    			td = element("td");
+    			t0 = text(t0_value);
+    			t1 = space();
+    			div2 = element("div");
+    			div0 = element("div");
+    			t2 = text(t2_value);
+    			t3 = space();
+    			div1 = element("div");
+    			attr(div0, "class", "popover-content");
+    			attr(div1, "class", "arrow");
+    			attr(div2, "class", "popover left");
+    			attr(td, "class", td_class_value = ctx.query.elapsedClassName);
+    		},
 
-function observe ( key, callback, options ) {
-	var group = ( options && options.defer ) ? this._observers.pre : this._observers.post;
+    		m(target, anchor) {
+    			insert(target, td, anchor);
+    			append(td, t0);
+    			append(td, t1);
+    			append(td, div2);
+    			append(div2, div0);
+    			append(div0, t2);
+    			append(div2, t3);
+    			append(div2, div1);
+    		},
 
-	( group[ key ] || ( group[ key ] = [] ) ).push( callback );
+    		p(changed, ctx) {
+    			if ((changed.dbs) && t0_value !== (t0_value = ctx.query.formatElapsed)) {
+    				set_data(t0, t0_value);
+    			}
 
-	if ( !options || options.init !== false ) {
-		callback.__calling = true;
-		callback.call( this, this._state[ key ] );
-		callback.__calling = false;
-	}
+    			if ((changed.dbs) && t2_value !== (t2_value = ctx.query.query)) {
+    				set_data(t2, t2_value);
+    			}
 
-	return {
-		cancel: function () {
-			var index = group[ key ].indexOf( callback );
-			if ( ~index ) group[ key ].splice( index, 1 );
-		}
-	};
-}
+    			if ((changed.dbs) && td_class_value !== (td_class_value = ctx.query.elapsedClassName)) {
+    				attr(td, "class", td_class_value);
+    			}
+    		},
 
-function on ( eventName, handler ) {
-	var handlers = this._handlers[ eventName ] || ( this._handlers[ eventName ] = [] );
-	handlers.push( handler );
+    		d(detaching) {
+    			if (detaching) {
+    				detach(td);
+    			}
+    		}
+    	};
+    }
 
-	return {
-		cancel: function () {
-			var index = handlers.indexOf( handler );
-			if ( ~index ) handlers.splice( index, 1 );
-		}
-	};
-}
+    // (7:2) {#each dbs as db}
+    function create_each_block(ctx) {
+    	var tr, td0, t0_value = ctx.db.dbname, t0, t1, td1, span, t2_value = ctx.db.lastSample.nbQueries, t2, span_class_value, t3, t4;
 
-function dispatchObservers ( component, group, newState, oldState ) {
-	for ( var key in group ) {
-		if ( !( key in newState ) ) continue;
+    	var each_value_1 = ctx.db.lastSample.topFiveQueries;
 
-		var newValue = newState[ key ];
-		var oldValue = oldState[ key ];
+    	var each_blocks = [];
 
-		if ( newValue === oldValue && typeof newValue !== 'object' ) continue;
+    	for (var i = 0; i < each_value_1.length; i += 1) {
+    		each_blocks[i] = create_each_block_1(get_each_context_1(ctx, each_value_1, i));
+    	}
 
-		var callbacks = group[ key ];
-		if ( !callbacks ) continue;
+    	return {
+    		c() {
+    			tr = element("tr");
+    			td0 = element("td");
+    			t0 = text(t0_value);
+    			t1 = space();
+    			td1 = element("td");
+    			span = element("span");
+    			t2 = text(t2_value);
+    			t3 = space();
 
-		for ( var i = 0; i < callbacks.length; i += 1 ) {
-			var callback = callbacks[i];
-			if ( callback.__calling ) continue;
+    			for (var i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].c();
+    			}
 
-			callback.__calling = true;
-			callback.call( component, newValue, oldValue );
-			callback.__calling = false;
-		}
-	}
-}
+    			t4 = space();
+    			attr(td0, "class", "dbname");
+    			attr(span, "class", span_class_value = ctx.db.lastSample.countClassName);
+    			attr(td1, "class", "query-count");
+    		},
 
-function renderMainFragment ( root, component ) {
-	var table = createElement( 'table' );
-	table.className = "table table-striped latest-data";
-	
-	var tbody = createElement( 'tbody' );
-	
-	appendNode( tbody, table );
-	var eachBlock_anchor = createComment( "#each dbs" );
-	appendNode( eachBlock_anchor, tbody );
-	var eachBlock_value = root.dbs;
-	var eachBlock_iterations = [];
-	
-	for ( var i = 0; i < eachBlock_value.length; i += 1 ) {
-		eachBlock_iterations[i] = renderEachBlock( root, eachBlock_value, eachBlock_value[i], i, component );
-		eachBlock_iterations[i].mount( eachBlock_anchor.parentNode, eachBlock_anchor );
-	}
+    		m(target, anchor) {
+    			insert(target, tr, anchor);
+    			append(tr, td0);
+    			append(td0, t0);
+    			append(tr, t1);
+    			append(tr, td1);
+    			append(td1, span);
+    			append(span, t2);
+    			append(tr, t3);
 
-	return {
-		mount: function ( target, anchor ) {
-			insertNode( table, target, anchor );
-		},
-		
-		update: function ( changed, root ) {
-			var eachBlock_value = root.dbs;
-			
-			for ( var i = 0; i < eachBlock_value.length; i += 1 ) {
-				if ( !eachBlock_iterations[i] ) {
-					eachBlock_iterations[i] = renderEachBlock( root, eachBlock_value, eachBlock_value[i], i, component );
-					eachBlock_iterations[i].mount( eachBlock_anchor.parentNode, eachBlock_anchor );
-				} else {
-					eachBlock_iterations[i].update( changed, root, eachBlock_value, eachBlock_value[i], i );
-				}
-			}
-			
-			teardownEach( eachBlock_iterations, true, eachBlock_value.length );
-			
-			eachBlock_iterations.length = eachBlock_value.length;
-		},
-		
-		teardown: function ( detach ) {
-			teardownEach( eachBlock_iterations, false );
-			
-			if ( detach ) {
-				detachNode( table );
-			}
-		}
-	};
-}
+    			for (var i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].m(tr, null);
+    			}
 
-function renderEachBlock ( root, eachBlock_value, db, db__index, component ) {
-	var tr = createElement( 'tr' );
-	
-	var td = createElement( 'td' );
-	td.className = "dbname";
-	
-	appendNode( td, tr );
-	var text = createText( db.dbname );
-	appendNode( text, td );
-	appendNode( createText( "\n\n      " ), tr );
-	
-	var td1 = createElement( 'td' );
-	td1.className = "query-count";
-	
-	appendNode( td1, tr );
-	
-	var span = createElement( 'span' );
-	span.className = db.lastSample.countClassName;
-	
-	appendNode( span, td1 );
-	var text2 = createText( db.lastSample.nbQueries );
-	appendNode( text2, span );
-	appendNode( createText( "\n\n      " ), tr );
-	var eachBlock1_anchor = createComment( "#each db.lastSample.topFiveQueries" );
-	appendNode( eachBlock1_anchor, tr );
-	var eachBlock1_value = db.lastSample.topFiveQueries;
-	var eachBlock1_iterations = [];
-	
-	for ( var i = 0; i < eachBlock1_value.length; i += 1 ) {
-		eachBlock1_iterations[i] = renderEachBlock1( root, eachBlock_value, db, db__index, eachBlock1_value, eachBlock1_value[i], i, component );
-		eachBlock1_iterations[i].mount( eachBlock1_anchor.parentNode, eachBlock1_anchor );
-	}
+    			append(tr, t4);
+    		},
 
-	return {
-		mount: function ( target, anchor ) {
-			insertNode( tr, target, anchor );
-		},
-		
-		update: function ( changed, root, eachBlock_value, db, db__index ) {
-			text.data = db.dbname;
-			
-			span.className = db.lastSample.countClassName;
-			
-			text2.data = db.lastSample.nbQueries;
-			
-			var eachBlock1_value = db.lastSample.topFiveQueries;
-			
-			for ( var i = 0; i < eachBlock1_value.length; i += 1 ) {
-				if ( !eachBlock1_iterations[i] ) {
-					eachBlock1_iterations[i] = renderEachBlock1( root, eachBlock_value, db, db__index, eachBlock1_value, eachBlock1_value[i], i, component );
-					eachBlock1_iterations[i].mount( eachBlock1_anchor.parentNode, eachBlock1_anchor );
-				} else {
-					eachBlock1_iterations[i].update( changed, root, eachBlock_value, db, db__index, eachBlock1_value, eachBlock1_value[i], i );
-				}
-			}
-			
-			teardownEach( eachBlock1_iterations, true, eachBlock1_value.length );
-			
-			eachBlock1_iterations.length = eachBlock1_value.length;
-		},
-		
-		teardown: function ( detach ) {
-			teardownEach( eachBlock1_iterations, false );
-			
-			if ( detach ) {
-				detachNode( tr );
-			}
-		}
-	};
-}
+    		p(changed, ctx) {
+    			if ((changed.dbs) && t0_value !== (t0_value = ctx.db.dbname)) {
+    				set_data(t0, t0_value);
+    			}
 
-function renderEachBlock1 ( root, eachBlock_value, db, db__index, eachBlock1_value, query, query__index, component ) {
-	var td = createElement( 'td' );
-	td.className = "Query " + ( root.elapsedClassName );
-	
-	var text = createText( query.formatElapsed );
-	appendNode( text, td );
-	appendNode( createText( "\n          " ), td );
-	
-	var div = createElement( 'div' );
-	div.className = "popover left";
-	
-	appendNode( div, td );
-	
-	var div1 = createElement( 'div' );
-	div1.className = "popover-content";
-	
-	appendNode( div1, div );
-	var text2 = createText( query.query );
-	appendNode( text2, div1 );
-	appendNode( createText( "\n            " ), div );
-	
-	var div2 = createElement( 'div' );
-	div2.className = "arrow";
-	
-	appendNode( div2, div );
+    			if ((changed.dbs) && t2_value !== (t2_value = ctx.db.lastSample.nbQueries)) {
+    				set_data(t2, t2_value);
+    			}
 
-	return {
-		mount: function ( target, anchor ) {
-			insertNode( td, target, anchor );
-		},
-		
-		update: function ( changed, root, eachBlock_value, db, db__index, eachBlock1_value, query, query__index ) {
-			td.className = "Query " + ( root.elapsedClassName );
-			
-			text.data = query.formatElapsed;
-			
-			text2.data = query.query;
-		},
-		
-		teardown: function ( detach ) {
-			if ( detach ) {
-				detachNode( td );
-			}
-		}
-	};
-}
+    			if ((changed.dbs) && span_class_value !== (span_class_value = ctx.db.lastSample.countClassName)) {
+    				attr(span, "class", span_class_value);
+    			}
 
-function Table ( options ) {
-	options = options || {};
-	
-	this._state = options.data || {};
+    			if (changed.dbs) {
+    				each_value_1 = ctx.db.lastSample.topFiveQueries;
 
-	this._observers = {
-		pre: Object.create( null ),
-		post: Object.create( null )
-	};
+    				for (var i = 0; i < each_value_1.length; i += 1) {
+    					const child_ctx = get_each_context_1(ctx, each_value_1, i);
 
-	this._handlers = Object.create( null );
+    					if (each_blocks[i]) {
+    						each_blocks[i].p(changed, child_ctx);
+    					} else {
+    						each_blocks[i] = create_each_block_1(child_ctx);
+    						each_blocks[i].c();
+    						each_blocks[i].m(tr, t4);
+    					}
+    				}
 
-	this._root = options._root;
-	this._yield = options._yield;
+    				for (; i < each_blocks.length; i += 1) {
+    					each_blocks[i].d(1);
+    				}
+    				each_blocks.length = each_value_1.length;
+    			}
+    		},
 
-	this._fragment = renderMainFragment( this._state, this );
-	if ( options.target ) this._fragment.mount( options.target, null );
-}
+    		d(detaching) {
+    			if (detaching) {
+    				detach(tr);
+    			}
 
-Table.prototype.get = get;
-Table.prototype.fire = fire;
-Table.prototype.observe = observe;
-Table.prototype.on = on;
+    			destroy_each(each_blocks, detaching);
+    		}
+    	};
+    }
 
-Table.prototype.set = function set ( newState ) {
-	var oldState = this._state;
-	this._state = Object.assign( {}, oldState, newState );
-	
-	dispatchObservers( this, this._observers.pre, newState, oldState );
-	if ( this._fragment ) this._fragment.update( newState, this._state );
-	dispatchObservers( this, this._observers.post, newState, oldState );
-};
+    function create_fragment(ctx) {
+    	var table, tbody;
 
-Table.prototype.teardown = function teardown ( detach ) {
-	this.fire( 'teardown' );
+    	var each_value = ctx.dbs;
 
-	this._fragment.teardown( detach !== false );
-	this._fragment = null;
+    	var each_blocks = [];
 
-	this._state = {};
-};
+    	for (var i = 0; i < each_value.length; i += 1) {
+    		each_blocks[i] = create_each_block(get_each_context(ctx, each_value, i));
+    	}
 
-perfMonitor.startFPSMonitor();
-perfMonitor.startMemMonitor();
-perfMonitor.initProfiler('view update');
+    	return {
+    		c() {
+    			table = element("table");
+    			tbody = element("tbody");
 
-const table = new Table({
-	target: document.querySelector( '#body' ),
-	data: {
-		dbs: ENV.generateData().toArray()
-	}
-});
+    			for (var i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].c();
+    			}
+    			attr(table, "class", "table table-striped latest-data");
+    		},
 
-function redraw() {
-	perfMonitor.startProfile('view update');
-	table.set({ dbs: ENV.generateData().toArray() });
-	perfMonitor.endProfile('view update');
-	setTimeout(redraw, ENV.timeout);
-}
+    		m(target, anchor) {
+    			insert(target, table, anchor);
+    			append(table, tbody);
 
-redraw();
-//# sourceMappingURL=bundle.js.map
+    			for (var i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].m(tbody, null);
+    			}
+    		},
+
+    		p(changed, ctx) {
+    			if (changed.dbs) {
+    				each_value = ctx.dbs;
+
+    				for (var i = 0; i < each_value.length; i += 1) {
+    					const child_ctx = get_each_context(ctx, each_value, i);
+
+    					if (each_blocks[i]) {
+    						each_blocks[i].p(changed, child_ctx);
+    					} else {
+    						each_blocks[i] = create_each_block(child_ctx);
+    						each_blocks[i].c();
+    						each_blocks[i].m(tbody, null);
+    					}
+    				}
+
+    				for (; i < each_blocks.length; i += 1) {
+    					each_blocks[i].d(1);
+    				}
+    				each_blocks.length = each_value.length;
+    			}
+    		},
+
+    		i: noop,
+    		o: noop,
+
+    		d(detaching) {
+    			if (detaching) {
+    				detach(table);
+    			}
+
+    			destroy_each(each_blocks, detaching);
+    		}
+    	};
+    }
+
+    function instance($$self, $$props, $$invalidate) {
+    	let { dbs } = $$props;
+
+    	$$self.$set = $$props => {
+    		if ('dbs' in $$props) $$invalidate('dbs', dbs = $$props.dbs);
+    	};
+
+    	return { dbs };
+    }
+
+    class Table extends SvelteComponent {
+    	constructor(options) {
+    		super();
+    		init(this, options, instance, create_fragment, safe_not_equal, ["dbs"]);
+    	}
+    }
+
+    perfMonitor.startFPSMonitor();
+    perfMonitor.startMemMonitor();
+    perfMonitor.initProfiler('view update');
+
+    const table = new Table({
+    	target: document.body,
+    	props: {
+    		dbs: ENV.generateData().toArray()
+    	}
+    });
+
+    function redraw() {
+    	perfMonitor.startProfile('view update');
+    	table.$set({dbs: ENV.generateData().toArray()});
+    	perfMonitor.endProfile('view update');
+    	setTimeout(redraw, ENV.timeout);
+    }
+
+    redraw();
+
+    return table;
+
+}());

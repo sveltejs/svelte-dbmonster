@@ -1,13 +1,18 @@
+// rollup.config.js
+import resolve from 'rollup-plugin-node-resolve';
 import svelte from 'rollup-plugin-svelte';
-import buble from 'rollup-plugin-buble';
-import uglify from 'rollup-plugin-uglify';
-
-const plugins = [ svelte() ];
-if ( process.env.production ) plugins.push( buble(), uglify() );
 
 export default {
-	entry: 'src/app.js',
-	dest: 'dist/bundle.js',
-	plugins,
-	sourceMap: true
-};
+  input: 'src/app.js',
+  output: {
+		name: 'bundle.js',
+    file: 'dist/bundle.js',
+    format: 'iife'
+  },
+  plugins: [
+    svelte({
+      include: ['src/*.svelte', 'src/*.html'],
+    }),
+    resolve()
+  ]
+}
